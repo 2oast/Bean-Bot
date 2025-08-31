@@ -1,13 +1,12 @@
 # server.py
-# pip install fastapi uvicorn pydantic "openai>=1.0.0"
-# Run: uvicorn server:app --host 0.0.0.0 --port 8000
+# pip install fastapi uvicorn pydantic openai
+# Run locally: uvicorn server:app --host 0.0.0.0 --port 8000
 import os, sqlite3, time
 from typing import Optional
-from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi import FastAPI, HTTPException  # Header removed
 from pydantic import BaseModel
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # optional
-SHARED_SECRET  = os.getenv("SHARED_SECRET", "change-me-please")
 
 try:
     from openai import OpenAI
@@ -72,16 +71,12 @@ def rule_based_reply(name: str, msg: str, mem: list[str]) -> str:
         return "got it—i saved that. (say 'forget: ...' to remove it)"
     if "forget:" in low:
         return "ok, scrubbed from memory."
-    # light personalization with known facts
     if mem:
         return f"noted! btw i remember: {', '.join(mem[:3])}"[:300]
     return "ok! tell me more?"
 
 @app.post("/chat")
-async def chat(payload: Payload, x_auth: Optional[str] = Header(None)):
-    if x_auth != SHARED_SECRET:
-        raise HTTPException(401, "bad secret")
-
+async def chat(payload: Payload):
     con = db()
     con.execute("INSERT INTO convos VALUES (?,?,?,?,?,?)", (
         int(time.time()),
@@ -94,8 +89,8 @@ async def chat(payload: Payload, x_auth: Optional[str] = Header(None)):
     con.commit()
 
     msg = payload.message.strip()
-    # Commands
     low = msg.lower()
+
     if low.startswith("consent:"):
         allow = "yes" in low
         set_consent(con, payload.agent_key, allow)
@@ -113,9 +108,7 @@ async def chat(payload: Payload, x_auth: Optional[str] = Header(None)):
 
     mem = get_mem(con, payload.agent_key)
 
-    # If you have an API key, use an LLM; otherwise simple mode
     if oai:
-        # Build a small system prompt with local memory
         sys = (
             "You are a friendly in-world NPC living in Second Life.\n"
             "Keep replies short (<= 2 sentences) and ask occasional follow-ups.\n"
@@ -128,19 +121,16 @@ async def chat(payload: Payload, x_auth: Optional[str] = Header(None)):
             {"role":"system", "content": sys},
             {"role":"user", "content": f"{payload.agent_name}: {msg}"}
         ]
-        # Use GPT (or any compatible provider) if configured
         try:
             resp = oai.chat.completions.create(
-                model="gpt-4o-mini",  # or any chat-capable model you prefer
+                model="gpt-4o-mini",
                 messages=messages,
                 temperature=0.7,
                 max_tokens=120,
             )
             text = resp.choices[0].message.content.strip()
             return {"reply": text}
-        except Exception as e:
-            # fall back gracefully
+        except Exception:
             return {"reply": rule_based_reply(payload.agent_name, msg, mem)}
 
-    # No LLM configured: rule-based fallback
     return {"reply": rule_based_reply(payload.agent_name, msg, mem)}
