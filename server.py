@@ -1,4 +1,4 @@
-# server.py — FastAPI bot backend for Second Life, robust OpenAI init (1.x or 0.x)
+# server.py — FastAPI bot backend for Second Life (legacy OpenAI client)
 # Start: uvicorn server:app --host 0.0.0.0 --port $PORT
 
 import os, sqlite3, time
@@ -6,31 +6,12 @@ from typing import List
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+# ─── OpenAI legacy client ─────────────────────────────────────────────────
+import openai
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-# ─── OpenAI init: prefer 1.x client, fallback to legacy 0.x ─────────────
-oai_mode = None   # "v1" or "legacy"
-oai_client = None
-
 if OPENAI_API_KEY:
-    try:
-        from openai import OpenAI  # 1.x style
-        # Some environments have weird kwargs (e.g., proxies) injected; catch TypeError
-        oai_client = OpenAI(api_key=OPENAI_API_KEY)
-        oai_mode = "v1"
-        print("[startup] OpenAI v1 client ready")
-    except Exception as e:
-        print(f"[startup] v1 client failed: {e} — trying legacy 0.x")
-        try:
-            import openai as openai_legacy
-            openai_legacy.api_key = OPENAI_API_KEY
-            oai_client = openai_legacy
-            oai_mode = "legacy"
-            print("[startup] OpenAI legacy client ready")
-        except Exception as e2:
-            print(f"[startup] OpenAI legacy init failed: {e2}")
-            oai_client = None
-            oai_mode = None
+    openai.api_key = OPENAI_API_KEY
+    print("[startup] OpenAI legacy client ready (0.28.x)")
 else:
     print("[startup] No OPENAI_API_KEY set; using rule-based replies")
 
@@ -114,10 +95,10 @@ def rule_based_reply(name: str, msg: str, mem: List[str]) -> str:
         return f"noted. btw i remember: {', '.join(mem[:3])}"[:300]
     return "ok! tell me more?"
 
-# ─── LLM helper ──────────────────────────────────────────────────────────
+# ─── LLM helper (legacy client) ──────────────────────────────────────────
 def llm_reply(agent_name: str, msg: str, mem: List[str], consent_ok: bool) -> str:
-    if not oai_client:
-        raise RuntimeError("No OpenAI client")
+    if not OPENAI_API_KEY:
+        raise RuntimeError("No OPENAI_API_KEY")
 
     system = (
         "You are a friendly in-world NPC living in Second Life.\n"
@@ -132,34 +113,16 @@ def llm_reply(agent_name: str, msg: str, mem: List[str], consent_ok: bool) -> st
         {"role": "user", "content": f"{agent_name}: {msg}"},
     ]
 
-    if oai_mode == "v1":
-        try:
-            resp = oai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                temperature=0.7,
-                max_tokens=120,
-            )
-            return resp.choices[0].message.content.strip()
-        except Exception as e:
-            raise RuntimeError(str(e))
-
-    # legacy 0.x path
-    try:
-        # Use a model that's universally available in legacy client
-        resp = oai_client.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            temperature=0.7,
-            max_tokens=120,
-        )
-        return resp.choices[0].message["content"].strip()
-    except Exception as e:
-        raise RuntimeError(str(e))
+    # legacy API call
+    resp = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",     # stable on legacy client
+        messages=messages,
+        temperature=0.7,
+        max_tokens=120,
+    )
+    return resp.choices[0].message["content"].strip()
 
 # ─── Routes ──────────────────────────────────────────────────────────────
-app = FastAPI()
-
 @app.get("/")
 async def root_status():
     return {"ok": True, "hint": "POST /chat (or /) with the bot payload"}
@@ -200,8 +163,8 @@ async def chat(payload: Payload):
     mem = get_mem(con, payload.agent_key)
     consent_ok = get_consent(con, payload.agent_key)
 
-    # Try LLM if available; fall back to rules on any error
-    if oai_client:
+    # Try LLM; fall back to rules on any error
+    if OPENAI_API_KEY:
         try:
             text = llm_reply(payload.agent_name, msg, mem, consent_ok)
             return {"reply": f"{text} [llm]"}
@@ -210,3 +173,4 @@ async def chat(payload: Payload):
             return {"reply": f"(fallback) LLM error: {e}"}
 
     return {"reply": rule_based_reply(payload.agent_name, msg, mem)}
+
